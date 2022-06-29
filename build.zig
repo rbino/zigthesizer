@@ -1,34 +1,33 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
-    // Standard target options allows the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
-    const target = b.standardTargetOptions(.{});
+const microzig = @import("microzig/src/main.zig");
 
+pub fn build(b: *std.build.Builder) !void {
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const exe = b.addExecutable("zigthesizer", "src/main.zig");
-    exe.setTarget(target);
+    const exe = try microzig.addEmbeddedExecutable(
+        b,
+        "zigthesizer.elf",
+        "src/main.zig",
+        .{ .board = microzig.boards.stm32f4discovery },
+        .{},
+    );
+
     exe.setBuildMode(mode);
     exe.install();
 
-    const run_cmd = exe.run();
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    const bin = b.addInstallRaw(exe, "zigthesizer.bin", .{});
+    b.getInstallStep().dependOn(&bin.step);
 
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
-
-    const exe_tests = b.addTest("src/main.zig");
-    exe_tests.setTarget(target);
-    exe_tests.setBuildMode(mode);
-
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&exe_tests.step);
+    const flash_cmd = b.addSystemCommand(&[_][]const u8{
+        "st-flash",
+        "write",
+        b.getInstallPath(bin.dest_dir, bin.dest_filename),
+        "0x8000000",
+    });
+    flash_cmd.step.dependOn(&bin.step);
+    const flash_step = b.step("flash", "Flash and run the app on your STM32F4Discovery");
+    flash_step.dependOn(&flash_cmd.step);
 }
