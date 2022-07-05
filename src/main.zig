@@ -1,37 +1,78 @@
 const std = @import("std");
 
-const microzig = @import("microzig");
-const regs = microzig.chip.registers;
+const micro = @import("microzig");
+const regs = micro.chip.registers;
+const RndGen = std.rand.DefaultPrng;
 
 pub fn main() anyerror!void {
     systemInit();
 
-    // Enable GPIOD port
-    regs.RCC.AHB1ENR.modify(.{ .GPIODEN = 1 });
+    const green_led = micro.Gpio(micro.Pin("PD12"), .{ .mode = .output, .initial_state = .high });
+    const orange_led = micro.Gpio(micro.Pin("PD13"), .{ .mode = .output, .initial_state = .high });
+    const red_led = micro.Gpio(micro.Pin("PD14"), .{ .mode = .output, .initial_state = .high });
+    const blue_led = micro.Gpio(micro.Pin("PD15"), .{ .mode = .output, .initial_state = .high });
 
-    // Set pin 12/13/14/15 mode to general purpose output
-    regs.GPIOD.MODER.modify(.{ .MODER12 = 0b01, .MODER13 = 0b01, .MODER14 = 0b01, .MODER15 = 0b01 });
+    const i2c = try micro.i2c.I2CController(1, .{}).init(.{ .target_speed = 100_000 });
+    const dsp_reset = micro.Gpio(micro.Pin("PD4"), .{ .mode = .output, .initial_state = .low });
+    dsp_reset.init();
+    std.time.sleep(600);
+    dsp_reset.setToHigh();
+    std.time.sleep(600);
 
-    // Set pin 12 and 14
-    regs.GPIOD.BSRR.modify(.{ .BS12 = 1, .BS14 = 1 });
+    try i2c.device(0x4a).writeRegister(0x00, 0x99); //These five command are the "magic" initialization
+    try i2c.device(0x4a).writeRegister(0x47, 0x80);
+    try i2c.device(0x4a).writeRegister(0x32, 0xbb);
+    try i2c.device(0x4a).writeRegister(0x32, 0x3b);
+    try i2c.device(0x4a).writeRegister(0x00, 0x00);
 
+    try i2c.device(0x4a).writeRegister(0x05, 0x20); //AUTO=0, SPEED=01, 32K=0, VIDEO=0, RATIO=0, MCLK=0
+    try i2c.device(0x4a).writeRegister(0x04, 0xaf); //Headphone always ON, Speaker always OFF
+    try i2c.device(0x4a).writeRegister(0x06, 0x04); //I2S Mode
+    try i2c.device(0x4a).writeRegister(0x02, 0x9e); // Power on
+    try i2c.device(0x4a).writeRegister(0x20, 0xd0); // Power on
+    try i2c.device(0x4a).writeRegister(0x21, 0xd0); // Power on
+
+    spiInit();
+
+    var i: u16 = 0;
+    var rnd = RndGen.init(0);
+    var inc: u16 = 400;
+    var x: u32 = 0;
     while (true) {
-        // Read the LED state
-        var leds_state = regs.GPIOD.ODR.read();
-        // Set the LED output to the negation of the currrent output
-        regs.GPIOD.ODR.modify(.{
-            .ODR12 = ~leds_state.ODR12,
-            .ODR13 = ~leds_state.ODR13,
-            .ODR14 = ~leds_state.ODR14,
-            .ODR15 = ~leds_state.ODR15,
-        });
-
-        // Sleep for some time
-        var i: u32 = 0;
-        while (i < 600000) {
-            asm volatile ("nop");
-            i += 1;
+        if (x < 10_000) {
+            regs.SPI3.DR.modify(i);
+            while (regs.SPI3.SR.read().TXE == 0) {}
+            regs.SPI3.DR.modify(i);
+            while (regs.SPI3.SR.read().TXE == 0) {}
+        } else if (x == 10_000) {
+            green_led.setToLow();
+            orange_led.setToLow();
+            red_led.setToLow();
+            blue_led.setToLow();
+        } else if (x < 20_000) {
+            regs.SPI3.DR.modify(0);
+            while (regs.SPI3.SR.read().TXE == 0) {}
+            regs.SPI3.DR.modify(0);
+            while (regs.SPI3.SR.read().TXE == 0) {}
+        } else if (x == 20_000) {
+            green_led.setToHigh();
+            orange_led.setToHigh();
+            red_led.setToHigh();
+            blue_led.setToHigh();
+            x = 0;
+            inc = 400 + @as(u16, rnd.random().int(u8));
         }
+
+        i = i +% inc;
+        x += 1;
+    }
+}
+
+pub fn sleep(nanoseconds: u64) void {
+    var i: usize = 0;
+    while (i < nanoseconds) {
+        asm volatile ("nop");
+        i += 1;
     }
 }
 
@@ -114,4 +155,51 @@ fn systemInit() void {
 
     // Disable HSI
     regs.RCC.CR.modify(.{ .HSION = 0 });
+}
+
+fn spiInit() void {
+    regs.RCC.APB1ENR.modify(.{ .SPI3EN = 1 });
+
+    const lrck = micro.Gpio(micro.Pin("PA4"), .{
+        .mode = .alternate_function,
+        .alternate_function = .af6,
+    });
+    const mclk = micro.Gpio(micro.Pin("PC7"), .{
+        .mode = .alternate_function,
+        .alternate_function = .af6,
+    });
+    const sclk = micro.Gpio(micro.Pin("PC10"), .{
+        .mode = .alternate_function,
+        .alternate_function = .af6,
+    });
+    const sdin = micro.Gpio(micro.Pin("PC12"), .{
+        .mode = .alternate_function,
+        .alternate_function = .af6,
+    });
+
+    lrck.init();
+    mclk.init();
+    sclk.init();
+    sdin.init();
+
+    // TODO: explain calculations here
+    regs.RCC.PLLI2SCFGR.modify(.{
+        .PLLI2SNx = 271,
+        .PLLI2SRx = 2,
+    });
+    // Enable PLLI2S
+    regs.RCC.CR.modify(.{ .PLLI2SON = 1 });
+
+    while (regs.RCC.CR.read().PLLI2SRDY == 0) {}
+
+    regs.SPI3.I2SPR.modify(.{
+        .MCKOE = 1,
+        .I2SDIV = 6,
+    });
+
+    regs.SPI3.I2SCFGR.modify(.{
+        .I2SMOD = 1, // I2S mode selected
+        .I2SE = 1, // I2S enabled
+        .I2SCFG = 0b10, // Master transmit
+    });
 }
